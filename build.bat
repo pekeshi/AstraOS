@@ -1,0 +1,1 @@
+nasm .\src\boot.asm -o .\build\pepeos.bin -f bin
