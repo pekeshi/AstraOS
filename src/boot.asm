@@ -10,6 +10,9 @@ mov dh, 0x18    ; Lower-right row (24 decimal / 0x18)
 mov dl, 0x4F    ; Lower-right column (79 decimal / 0x4F)
 int 10h         ; Call BIOS video interrupt
 
+; Move the cursor to the top-left row W.I.P
+
+
 ; Store the message from hello_bios to the bx register
 mov bx, hello_bios  ; Move the message string into bx register
 mov ah, 0x0e        ; Call the BIOS teletype output mode
