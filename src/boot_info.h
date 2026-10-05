@@ -10,6 +10,7 @@ struct boot_info {
     uint32_t descriptor_version;       /* Muistikuvauksen versio. */
     uint32_t reserved;                 /* Varattu tulevaa käyttöä varten. */
     void *memory_map;                  /* Osoite UEFI:n muistialuekarttaan. */
+    void *acpi_root_pointer;           /* ACPI:n RSDP-osoitin. */
     uint64_t kernel_base;              /* Ytimen latausalueen alku. */
     uint64_t kernel_size;              /* Ytimen latausalueen koko tavuina. */
     uint64_t framebuffer_base;         /* Näytön kuvapuskurin osoite. */

@@ -38,6 +38,11 @@ struct efi_guid {
     uint8_t data4[8];
 };
 
+struct efi_configuration_table {
+    struct efi_guid vendor_guid;
+    void *vendor_table;
+};
+
 /* UEFI-taulukoiden ja palveluiden rakenteet seuraavat firmware-rajapintaa. */
 struct efi_table_header {
     uint64_t signature;
@@ -161,6 +166,8 @@ struct efi_system_table {
     void *standard_error;
     void *runtime_services;
     struct efi_boot_services *boot_services;
+    uint64_t configuration_table_count;
+    struct efi_configuration_table *configuration_table;
 };
 
 /* Varmista, että itse määriteltyjen rakenteiden kentät ovat oikeissa kohdissa. */
@@ -180,6 +187,12 @@ _Static_assert(__builtin_offsetof(struct efi_boot_services, locate_protocol) == 
                "UEFI boot-services layout mismatch");
 _Static_assert(__builtin_offsetof(struct efi_system_table, boot_services) == 96,
                "UEFI system-table layout mismatch");
+_Static_assert(__builtin_offsetof(struct efi_system_table,
+                                  configuration_table_count) == 104,
+               "UEFI system-table configuration count layout mismatch");
+_Static_assert(__builtin_offsetof(struct efi_system_table,
+                                  configuration_table) == 112,
+               "UEFI system-table configuration table layout mismatch");
 _Static_assert(__builtin_offsetof(struct efi_graphics_output_protocol_mode,
                                   framebuffer_base) == 24,
                "UEFI graphics mode layout mismatch");
@@ -231,6 +244,50 @@ extern void enter_kernel(kernel_entry entry, struct boot_info *boot_info, void *
 /* Säilytä UEFI-taulukot, jotta apufunktiot voivat käyttää niiden palveluita. */
 static struct efi_system_table *system_table;
 static struct efi_boot_services *boot_services;
+
+/* Hae ACPI 2.0 RSDP ja säilytä ACPI 1.0 varavaihtoehtona. */
+static void *find_acpi_root_pointer(void) {
+    static const struct efi_guid acpi_20_guid = {
+        0x8868e871, 0xe4f1, 0x11d3, {0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81}
+    };
+    static const struct efi_guid acpi_10_guid = {
+        0xeb9d2d30, 0x2d88, 0x11d3, {0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d}
+    };
+    void *acpi_10_table = 0;
+
+    if (system_table->configuration_table == 0) {
+        return 0;
+    }
+    for (uint64_t i = 0; i < system_table->configuration_table_count; ++i) {
+        const struct efi_guid *guid =
+            &system_table->configuration_table[i].vendor_guid;
+        int matches_acpi_20 = guid->data1 == acpi_20_guid.data1 &&
+            guid->data2 == acpi_20_guid.data2 &&
+            guid->data3 == acpi_20_guid.data3;
+        int matches_acpi_10 = guid->data1 == acpi_10_guid.data1 &&
+            guid->data2 == acpi_10_guid.data2 &&
+            guid->data3 == acpi_10_guid.data3;
+
+        for (uint32_t j = 0; j < sizeof(guid->data4); ++j) {
+            if (guid->data4[j] != acpi_20_guid.data4[j]) {
+                matches_acpi_20 = 0;
+            }
+            if (guid->data4[j] != acpi_10_guid.data4[j]) {
+                matches_acpi_10 = 0;
+            }
+        }
+        if (matches_acpi_20) {
+            void *acpi_20_table = system_table->configuration_table[i].vendor_table;
+            if (acpi_20_table != 0) {
+                return acpi_20_table;
+            }
+        }
+        if (matches_acpi_10) {
+            acpi_10_table = system_table->configuration_table[i].vendor_table;
+        }
+    }
+    return acpi_10_table;
+}
 
 /* UEFI-konsoli tulostaa nämä UTF-16-merkit. */
 static const uint16_t message_loading[] = {
@@ -581,6 +638,7 @@ static efi_status exit_boot_services_and_enter(efi_handle image,
         boot_info->descriptor_version = descriptor_version;
         boot_info->reserved = 0;
         boot_info->memory_map = memory_map;
+        boot_info->acpi_root_pointer = find_acpi_root_pointer();
         boot_info->kernel_base = kernel_base;
         boot_info->kernel_size = kernel_end - kernel_base;
 

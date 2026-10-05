@@ -43,15 +43,23 @@ run.bat
 them and launches QEMU/OVMF. The UEFI application prints a loading message;
 after handoff, the C kernel prints `Hello from the AstraOS C kernel.` to COM1,
 draws a top bar labeled `AstraOS Kernel - 0.1.0 - pekeshi` in the QEMU window,
-and starts a serial shell. Type commands into the terminal running `run.bat`.
-The initial commands are `help`, `about`, and `clear`. The run script uses the
+and starts a visible kernel shell. Click the QEMU window and use its keyboard,
+or type into the terminal running `run.bat` over COM1.
+The commands are `help`, `about`, `clear`, `mem`, `alloc`,
+`free <hex-address>`, and `shutdown`. `mem` reports currently free physical
+pages, `alloc` reserves one page and prints its physical address, and `free`
+releases a page previously returned by `alloc`. The physical allocator tracks
+memory below 64 GiB; pages outside that range are not managed. Shell output is
+shown in the QEMU framebuffer and mirrored to COM1. `shutdown` requests ACPI S5
+soft-off using the tables provided by firmware; soft-off depends on firmware
+and hardware support, and unsupported ACPI configurations are reported. The
+run script uses the
 MSYS2 firmware files
 `C:\msys64\mingw64\share\qemu\edk2-x86_64-code.fd` and
 `C:\msys64\mingw64\share\qemu\edk2-i386-vars.fd`, so adjust those paths in
 `run.bat` if your firmware is installed elsewhere. The variable-store template
 is copied to `out\uefi` before each run. The UEFI console shows the loading
-message, while the QEMU terminal shows the kernel's COM1 output and accepts
-shell input. Close the QEMU window to stop it.
+message. Close the QEMU window to stop it.
 
 ### Next milestones
 
@@ -59,10 +67,9 @@ The loader passes a `boot_info` structure from `src/boot_info.h`, including the
 UEFI memory map and framebuffer address, dimensions, stride, and pixel format.
 The kernel starts on its own stack. Build on that foundation:
 
-1. Walk the memory-map descriptors and report usable memory from the kernel.
-2. Add a kernel-owned physical page allocator using the memory map.
-3. Set up the GDT, IDT, and exception handlers so faults can be diagnosed.
-4. Add a timer and keyboard input after the basic memory and exception setup.
+1. Add GDT, IDT, and exception handlers so faults can be diagnosed.
+2. Add a timer and interrupt-driven keyboard input after the basic exception
+   setup.
 
 After `ExitBootServices`, the kernel must not call UEFI boot services. Keep the
 kernel freestanding: it has no C library or normal operating system to rely on.
