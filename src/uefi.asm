@@ -96,7 +96,7 @@ halt:
 
 ; UEFI:n tulostusviesti on UTF-16-muodossa.
 boot_message:
-    dw 'P', 'e', 'p', 'e', 'O', 'S', ' ', 'U', 'E', 'F', 'I', ' '
+    dw 'A', 's', 't', 'r', 'a', 'O', 'S', ' ', 'U', 'E', 'F', 'I', ' '
     dw 'b', 'o', 'o', 't', 'l', 'o', 'a', 'd', 'e', 'r', ' '
     dw 's', 't', 'a', 'r', 't', 'e', 'd', '.', 13, 10, 0
 

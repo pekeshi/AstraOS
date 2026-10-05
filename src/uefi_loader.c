@@ -226,23 +226,23 @@ static struct efi_system_table *system_table;
 static struct efi_boot_services *boot_services;
 
 static const uint16_t message_loading[] = {
-    'P', 'e', 'p', 'e', 'O', 'S', ':', ' ', 'l', 'o', 'a', 'd', 'i', 'n', 'g', ' ',
+    'A', 's', 't', 'r', 'a', 'O', 'S', ':', ' ', 'l', 'o', 'a', 'd', 'i', 'n', 'g', ' ',
     'k', 'e', 'r', 'n', 'e', 'l', '.', '.', '.', '\r', '\n', 0
 };
 static const uint16_t message_read_error[] = {
-    'P', 'e', 'p', 'e', 'O', 'S', ':', ' ', 'c', 'a', 'n', 'n', 'o', 't', ' ',
+    'A', 's', 't', 'r', 'a', 'O', 'S', ':', ' ', 'c', 'a', 'n', 'n', 'o', 't', ' ',
     'r', 'e', 'a', 'd', ' ', 'k', 'e', 'r', 'n', 'e', 'l', '.', '\r', '\n', 0
 };
 static const uint16_t message_elf_error[] = {
-    'P', 'e', 'p', 'e', 'O', 'S', ':', ' ', 'i', 'n', 'v', 'a', 'l', 'i', 'd', ' ',
+    'A', 's', 't', 'r', 'a', 'O', 'S', ':', ' ', 'i', 'n', 'v', 'a', 'l', 'i', 'd', ' ',
     'E', 'L', 'F', ' ', 'k', 'e', 'r', 'n', 'e', 'l', '.', '\r', '\n', 0
 };
 static const uint16_t message_load_error[] = {
-    'P', 'e', 'p', 'e', 'O', 'S', ':', ' ', 'c', 'o', 'u', 'l', 'd', ' ',
+    'A', 's', 't', 'r', 'a', 'O', 'S', ':', ' ', 'c', 'o', 'u', 'l', 'd', ' ',
     'n', 'o', 't', ' ', 'l', 'o', 'a', 'd', ' ', 'k', 'e', 'r', 'n', 'e', 'l', '.', '\r', '\n', 0
 };
 static const uint16_t message_exit_error[] = {
-    'P', 'e', 'p', 'e', 'O', 'S', ':', ' ', 'c', 'o', 'u', 'l', 'd', ' ',
+    'A', 's', 't', 'r', 'a', 'O', 'S', ':', ' ', 'c', 'o', 'u', 'l', 'd', ' ',
     'n', 'o', 't', ' ', 'e', 'x', 'i', 't', ' ', 'U', 'E', 'F', 'I', '.', '\r', '\n', 0
 };
 
@@ -528,6 +528,14 @@ static efi_status exit_boot_services_and_enter(efi_handle image,
         return status;
     }
 
+    boot_info->framebuffer_base = 0;
+    boot_info->framebuffer_size = 0;
+    boot_info->framebuffer_width = 0;
+    boot_info->framebuffer_height = 0;
+    boot_info->pixels_per_scanline = 0;
+    boot_info->framebuffer_format = 0;
+    get_framebuffer_info(boot_info);
+
     for (;;) {
         map_size = map_capacity;
         status = boot_services->get_memory_map(&map_size, memory_map, &map_key,
@@ -553,7 +561,6 @@ static efi_status exit_boot_services_and_enter(efi_handle image,
         boot_info->memory_map = memory_map;
         boot_info->kernel_base = kernel_base;
         boot_info->kernel_size = kernel_end - kernel_base;
-        get_framebuffer_info(boot_info);
 
         status = boot_services->exit_boot_services(image, map_key);
         if (status == EFI_INVALID_PARAMETER) {

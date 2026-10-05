@@ -1,5 +1,5 @@
-#ifndef PEPEOS_BOOT_INFO_H
-#define PEPEOS_BOOT_INFO_H
+#ifndef ASTRAOS_BOOT_INFO_H
+#define ASTRAOS_BOOT_INFO_H
 
 #include <stdint.h>
 

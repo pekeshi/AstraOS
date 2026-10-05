@@ -1,4 +1,6 @@
-My toy operating system project, feel free to clone and modify.
+# AstraOS
+
+A small x86_64 UEFI operating system project.
 
 ## x86_64 UEFI bootloader
 
@@ -39,8 +41,9 @@ run.bat
 
 `build.bat` builds the UEFI application and ELF64 kernel. `run.bat` rebuilds
 them and launches QEMU/OVMF. The UEFI application prints a loading message;
-after handoff, the C kernel prints `Hello from the PepeOS C kernel.` to COM1,
-which QEMU shows in the terminal. The run script uses the MSYS2 firmware files
+after handoff, the C kernel prints `Hello from the AstraOS C kernel.` to COM1
+and draws a top bar labeled `AstraOS Kernel - 0.1.0 - pekeshi` in the QEMU
+window. The run script uses the MSYS2 firmware files
 `C:\msys64\mingw64\share\qemu\edk2-x86_64-code.fd` and
 `C:\msys64\mingw64\share\qemu\edk2-i386-vars.fd`, so adjust those paths in
 `run.bat` if your firmware is installed elsewhere. The variable-store template
@@ -50,16 +53,14 @@ halts; close the QEMU window to stop it.
 
 ### Next milestones
 
-The first kernel handoff works. The loader passes a `boot_info` structure from
-`src/boot_info.h`, including the UEFI memory map, and the kernel starts on its
-own stack. Build on that foundation:
+The loader passes a `boot_info` structure from `src/boot_info.h`, including the
+UEFI memory map and framebuffer address, dimensions, stride, and pixel format.
+The kernel starts on its own stack. Build on that foundation:
 
 1. Walk the memory-map descriptors and report usable memory from the kernel.
-2. Find the UEFI Graphics Output Protocol, pass framebuffer details in
-   `boot_info`, and draw a simple kernel message.
-3. Add a kernel-owned physical page allocator using the memory map.
-4. Set up the GDT, IDT, and exception handlers so faults can be diagnosed.
-5. Add a timer and keyboard input after the basic memory and exception setup.
+2. Add a kernel-owned physical page allocator using the memory map.
+3. Set up the GDT, IDT, and exception handlers so faults can be diagnosed.
+4. Add a timer and keyboard input after the basic memory and exception setup.
 
 After `ExitBootServices`, the kernel must not call UEFI boot services. Keep the
 kernel freestanding: it has no C library or normal operating system to rely on.
