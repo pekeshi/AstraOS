@@ -16,6 +16,7 @@ int 10h         ; Call BIOS video interrupt
 mov bx, hello_bios  ; Move the message string into bx register
 mov ah, 0x0e        ; Call the BIOS teletype output mode
 
+; Loop through the characters
 loop:               ; Loop the string until we find 0, then jump into exit
     mov al, [bx]    ; Move the character from bx to al
     cmp al, 0       ; Compare character from al to 0
@@ -24,10 +25,15 @@ loop:               ; Loop the string until we find 0, then jump into exit
     inc bx          ; Increment bx, (to get the other character)
     jmp loop        ; Jump to the start, (now we have a loop that runs until we get a 0)
 
+; Exit label
 exit:               ; The exit loop
     jmp $           ; Just jumps to the start
 
+; Messages
 hello_bios db 'Bootloader working!', 0  ; Our null-terminated message string
 
+; Padding
 times 510-($-$$) db 0                   ; Padding of zeroes so that our bootloader is full
+
+; Boot signature
 dw 0xAA55

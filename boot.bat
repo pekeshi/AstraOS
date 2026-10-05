@@ -1,1 +1,0 @@
-qemu-system-x86_64.exe -fda .\build\pepeos.bin
