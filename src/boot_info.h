@@ -4,20 +4,20 @@
 #include <stdint.h>
 
 struct boot_info {
-    uint64_t memory_map_size;
-    uint64_t memory_map_key;
-    uint64_t descriptor_size;
-    uint32_t descriptor_version;
-    uint32_t reserved;
-    void *memory_map;
-    uint64_t kernel_base;
-    uint64_t kernel_size;
-    uint64_t framebuffer_base;
-    uint64_t framebuffer_size;
-    uint32_t framebuffer_width;
-    uint32_t framebuffer_height;
-    uint32_t pixels_per_scanline;
-    uint32_t framebuffer_format;
+    uint64_t memory_map_size;          /* Kartan koko tavuina. */
+    uint64_t memory_map_key;           /* UEFI:n kartalle antama avain. */
+    uint64_t descriptor_size;          /* Yhden muistialueen kuvauksen koko. */
+    uint32_t descriptor_version;       /* Muistikuvauksen versio. */
+    uint32_t reserved;                 /* Varattu tulevaa käyttöä varten. */
+    void *memory_map;                  /* Osoite UEFI:n muistialuekarttaan. */
+    uint64_t kernel_base;              /* Ytimen latausalueen alku. */
+    uint64_t kernel_size;              /* Ytimen latausalueen koko tavuina. */
+    uint64_t framebuffer_base;         /* Näytön kuvapuskurin osoite. */
+    uint64_t framebuffer_size;         /* Kuvapuskurin koko tavuina. */
+    uint32_t framebuffer_width;        /* Kuvan leveys pikseleinä. */
+    uint32_t framebuffer_height;       /* Kuvan korkeus pikseleinä. */
+    uint32_t pixels_per_scanline;      /* Kuvapuskurin pikselit yhdellä rivillä. */
+    uint32_t framebuffer_format;       /* GOP:n käyttämä pikselimuoto. */
 };
 
 #endif

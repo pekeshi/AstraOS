@@ -3,16 +3,17 @@ BITS 64
 section .text
 global enter_kernel
 
-; Microsoft x64 arguments: RCX=entry, RDX=boot info, R8=stack top.
-; The kernel entry follows the System V x86_64 calling convention.
+; UEFI antaa argumentit rekistereissä RCX, RDX ja R8.
+; Ydin käyttää System V -kutsukäytäntöä, jossa ensimmäinen argumentti on RDI.
 enter_kernel:
     cli
-    cld
-    mov rsp, r8
-    and rsp, -16
-    mov rdi, rdx
-    call rcx
+    cld                 ; Merkkijonokäskyt etenevät muistissa eteenpäin.
+    mov rsp, r8         ; Ota käyttöön ytimen oma pino.
+    and rsp, -16        ; Kohdista pino 16 tavun rajalle.
+    mov rdi, rdx        ; Välitä käynnistystiedot ytimen argumenttina.
+    call rcx            ; Siirry ytimen aloituskohtaan.
 
 .halt:
+    ; Ytimen paluu ei ole sallittu: pysähdy turvallisesti.
     hlt
     jmp .halt

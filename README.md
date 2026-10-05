@@ -41,15 +41,17 @@ run.bat
 
 `build.bat` builds the UEFI application and ELF64 kernel. `run.bat` rebuilds
 them and launches QEMU/OVMF. The UEFI application prints a loading message;
-after handoff, the C kernel prints `Hello from the AstraOS C kernel.` to COM1
-and draws a top bar labeled `AstraOS Kernel - 0.1.0 - pekeshi` in the QEMU
-window. The run script uses the MSYS2 firmware files
+after handoff, the C kernel prints `Hello from the AstraOS C kernel.` to COM1,
+draws a top bar labeled `AstraOS Kernel - 0.1.0 - pekeshi` in the QEMU window,
+and starts a serial shell. Type commands into the terminal running `run.bat`.
+The initial commands are `help`, `about`, and `clear`. The run script uses the
+MSYS2 firmware files
 `C:\msys64\mingw64\share\qemu\edk2-x86_64-code.fd` and
 `C:\msys64\mingw64\share\qemu\edk2-i386-vars.fd`, so adjust those paths in
 `run.bat` if your firmware is installed elsewhere. The variable-store template
 is copied to `out\uefi` before each run. The UEFI console shows the loading
-message, and the QEMU terminal shows the kernel's COM1 output. The kernel then
-halts; close the QEMU window to stop it.
+message, while the QEMU terminal shows the kernel's COM1 output and accepts
+shell input. Close the QEMU window to stop it.
 
 ### Next milestones
 

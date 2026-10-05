@@ -2,16 +2,16 @@
 BITS 64
 ORG 0
 
-; Tiedosto ja koodiosio kohdistetaan UEFI:n vaatimalla tavalla.
-%define FILE_ALIGNMENT                  0x200       ; 0x200 = 512 tavua
-%define SECTION_ALIGNMENT               0x1000      ; 0x1000 = 4096 tavua
-%define IMAGE_BASE                      0x10000000  ; Image base address for UEFI applications
-%define IMAGE_FILE_RELOCS_STRIPPED      0x0001      ; No relocation information is present in the file., no need to perform any fixups.
-%define IMAGE_FILE_EXECUTABLE_IMAGE     0x0002      ; The file is executable (no unresolved external references).
-%define IMAGE_FILE_LARGE_ADDRESS_AWARE  0x0020      ; The application can handle addresses larger than 2 GB.
-%define IMAGE_SCN_CNT_CODE              0x00000020  ; The section contains executable code.
-%define IMAGE_SCN_MEM_EXECUTE           0x20000000  ; The section can be executed as code.
-%define IMAGE_SCN_MEM_READ              0x40000000  ; The section can be read.
+; Tiedoston ja muistiosion kohdistukset.
+%define FILE_ALIGNMENT                  0x200       ; 512 tavua tiedostossa.
+%define SECTION_ALIGNMENT               0x1000      ; 4096 tavua muistissa.
+%define IMAGE_BASE                      0x10000000  ; Ohjelman latauksen perusosoite.
+%define IMAGE_FILE_RELOCS_STRIPPED      0x0001      ; Tiedostossa ei ole korjaustietoja.
+%define IMAGE_FILE_EXECUTABLE_IMAGE     0x0002      ; Tiedosto on suoritettava ohjelma.
+%define IMAGE_FILE_LARGE_ADDRESS_AWARE  0x0020      ; Ohjelma voi käyttää yli 2 Gt:n osoitteita.
+%define IMAGE_SCN_CNT_CODE              0x00000020  ; Osio sisältää konekoodia.
+%define IMAGE_SCN_MEM_EXECUTE           0x20000000  ; Osion koodi voidaan suorittaa.
+%define IMAGE_SCN_MEM_READ              0x40000000  ; Osiota voidaan lukea.
 
 ; Koodiosion koko pyöristetään tiedoston kohdistukseen.
 %define aligned_code_size ((code_end - code_start + FILE_ALIGNMENT - 1) & ~(FILE_ALIGNMENT - 1))
@@ -33,7 +33,7 @@ pe_header:
     dw 0xF0
     dw IMAGE_FILE_RELOCS_STRIPPED | IMAGE_FILE_EXECUTABLE_IMAGE | IMAGE_FILE_LARGE_ADDRESS_AWARE
 
-; PE32+-otsake määrittelee käynnistyskohdan ja muistiasettelun.
+; PE32+-otsake määrittelee aloituskohdan, kohdistukset ja UEFI-tyypin.
 optional_header:
     dw 0x20B
     db 0, 0
@@ -62,7 +62,7 @@ optional_header:
     dd 16
     times 16 * 8 db 0
 
-; Ainoa osio sisältää suoritettavan koodin.
+; Ainoa osio sisältää suoritettavan koodin ja viestin.
 section_header:
     db '.text', 0, 0, 0
     dd code_end - code_start

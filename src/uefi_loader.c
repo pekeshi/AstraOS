@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include "boot_info.h"
 
+/* UEFI:n tilakoodit ja käytetyt muistivarauksen asetukset. */
 #define EFI_SUCCESS 0
 #define EFI_BUFFER_TOO_SMALL 0x8000000000000005ULL
 #define EFI_INVALID_PARAMETER 0x8000000000000002ULL
@@ -25,6 +26,7 @@
 #define KERNEL_STACK_PAGES 16
 #define MEMORY_MAP_CAPACITY (64 * 1024)
 
+/* UEFI käyttää x86-64:ssä 64-bittisiä osoitteita ja tilakoodeja. */
 typedef uint64_t efi_status;
 typedef uint64_t efi_uintn;
 typedef void *efi_handle;
@@ -36,6 +38,7 @@ struct efi_guid {
     uint8_t data4[8];
 };
 
+/* UEFI-taulukoiden ja palveluiden rakenteet seuraavat firmware-rajapintaa. */
 struct efi_table_header {
     uint64_t signature;
     uint32_t revision;
@@ -145,6 +148,7 @@ struct efi_graphics_output_protocol {
     struct efi_graphics_output_protocol_mode *mode;
 };
 
+/* Käynnistyksen aikana käyttöön annetut UEFI-taulukot. */
 struct efi_system_table {
     struct efi_table_header header;
     uint16_t *firmware_vendor;
@@ -159,6 +163,7 @@ struct efi_system_table {
     struct efi_boot_services *boot_services;
 };
 
+/* Varmista, että itse määriteltyjen rakenteiden kentät ovat oikeissa kohdissa. */
 _Static_assert(__builtin_offsetof(struct efi_simple_text_output_protocol, output_string) == 8,
                "UEFI text-output protocol layout mismatch");
 _Static_assert(__builtin_offsetof(struct efi_file_protocol, read) == 32,
@@ -185,6 +190,7 @@ _Static_assert(__builtin_offsetof(struct efi_graphics_output_protocol_mode,
 #define GOP_PIXEL_RED_GREEN_BLUE_RESERVED8 0
 #define GOP_PIXEL_BLUE_GREEN_RED_RESERVED8 1
 
+/* ELF64-otsakkeet kuvaavat tiedoston ja ladattavat muistiosiot. */
 struct efi_file_info {
     uint64_t size;
     uint64_t file_size;
@@ -222,9 +228,11 @@ typedef void (*kernel_entry)(struct boot_info *) __attribute__((sysv_abi, noretu
 
 extern void enter_kernel(kernel_entry entry, struct boot_info *boot_info, void *stack_top);
 
+/* Säilytä UEFI-taulukot, jotta apufunktiot voivat käyttää niiden palveluita. */
 static struct efi_system_table *system_table;
 static struct efi_boot_services *boot_services;
 
+/* UEFI-konsoli tulostaa nämä UTF-16-merkit. */
 static const uint16_t message_loading[] = {
     'A', 's', 't', 'r', 'a', 'O', 'S', ':', ' ', 'l', 'o', 'a', 'd', 'i', 'n', 'g', ' ',
     'k', 'e', 'r', 'n', 'e', 'l', '.', '.', '.', '\r', '\n', 0
@@ -246,12 +254,14 @@ static const uint16_t message_exit_error[] = {
     'n', 'o', 't', ' ', 'e', 'x', 'i', 't', ' ', 'U', 'E', 'F', 'I', '.', '\r', '\n', 0
 };
 
+/* Kirjoita viesti UEFI:n tekstikonsoliin, jos konsoli on käytettävissä. */
 static void print(const uint16_t *message) {
     if (system_table != 0 && system_table->console_out != 0) {
         system_table->console_out->output_string(system_table->console_out, message);
     }
 }
 
+/* Hae näytön kuvapuskurin tiedot ennen UEFI-palveluista poistumista. */
 static void get_framebuffer_info(struct boot_info *boot_info) {
     static struct efi_guid graphics_guid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
     struct efi_graphics_output_protocol *graphics = 0;
@@ -283,6 +293,7 @@ static void get_framebuffer_info(struct boot_info *boot_info) {
     boot_info->framebuffer_format = info->pixel_format;
 }
 
+/* Pysähdy virhetilanteessa sen sijaan, että jatkaisit rikkinäisillä tiedoilla. */
 static void halt(void) __attribute__((noreturn));
 static void halt(void) {
     for (;;) {
@@ -290,6 +301,7 @@ static void halt(void) {
     }
 }
 
+/* Varaa muistia UEFI:n hallitsemasta muistista. */
 static void *allocate_pool(efi_uintn size) {
     void *buffer = 0;
     if (EFI_ERROR(boot_services->allocate_pool(EFI_LOADER_DATA, size, &buffer))) {
@@ -298,10 +310,12 @@ static void *allocate_pool(efi_uintn size) {
     return buffer;
 }
 
+/* Tarkista tiedoston rajat ylivuodon välttämiseksi. */
 static int file_range_valid(uint64_t offset, uint64_t size, uint64_t file_size) {
     return offset <= file_size && size <= file_size - offset;
 }
 
+/* Avaa EFI-osion juuressa oleva kernel.elf ja lue se muistiin. */
 static efi_status read_kernel(uint8_t **file_buffer, uint64_t *file_size) {
     static struct efi_guid file_system_guid = EFI_SIMPLE_FILE_SYSTEM_GUID;
     static struct efi_guid file_info_guid = EFI_FILE_INFO_GUID;
@@ -373,6 +387,7 @@ static efi_status read_kernel(uint8_t **file_buffer, uint64_t *file_size) {
     return EFI_SUCCESS;
 }
 
+/* Tarkista ELF ennen kuin sen sisältämää koodia suoritetaan. */
 static int validate_elf(const uint8_t *file, uint64_t file_size,
                         struct elf64_header **header_out,
                         struct elf64_program_header **program_headers_out,
@@ -385,6 +400,7 @@ static int validate_elf(const uint8_t *file, uint64_t file_size,
     int has_load_segment = 0;
     int entry_is_executable = 0;
 
+    /* Hyväksy vain vähänpääinen 64-bittinen x86-64-suoritettava ELF. */
     if (header->ident[0] != 0x7F || header->ident[1] != 'E' ||
         header->ident[2] != 'L' || header->ident[3] != 'F' ||
         header->ident[4] != 2 || header->ident[5] != 1 ||
@@ -404,6 +420,7 @@ static int validate_elf(const uint8_t *file, uint64_t file_size,
     }
     program_headers = (struct elf64_program_header *)(file + header->program_header_offset);
 
+    /* Tarkista jokaisen ladattavan osion rajat ja etsi ytimen muistialue. */
     for (uint16_t i = 0; i < header->program_header_count; ++i) {
         struct elf64_program_header *segment = &program_headers[i];
         uint64_t segment_end;
@@ -445,6 +462,7 @@ static int validate_elf(const uint8_t *file, uint64_t file_size,
         (kernel_base & (PAGE_SIZE - 1)) != 0) {
         return 0;
     }
+    /* Ladattavat osiot eivät saa mennä päällekkäin. */
     for (uint16_t i = 0; i < header->program_header_count; ++i) {
         struct elf64_program_header *left = &program_headers[i];
         if (left->type != ELF_PT_LOAD || left->memory_size == 0) {
@@ -467,6 +485,7 @@ static int validate_elf(const uint8_t *file, uint64_t file_size,
     return 1;
 }
 
+/* Varaa ytimen osoitealue, nollaa se ja kopioi ELF-osiot paikalleen. */
 static efi_status load_segments(const uint8_t *file,
                                struct elf64_header *header,
                                struct elf64_program_header *program_headers,
@@ -482,6 +501,7 @@ static efi_status load_segments(const uint8_t *file,
         return EFI_ERROR(status) ? status : EFI_INVALID_PARAMETER;
     }
 
+    /* Nollaus täyttää myös ELF:n BSS-alueen. */
     for (uint64_t i = 0; i < span; ++i) {
         ((uint8_t *)kernel_base)[i] = 0;
     }
@@ -499,6 +519,7 @@ static efi_status load_segments(const uint8_t *file,
     return EFI_SUCCESS;
 }
 
+/* Hae lopullinen muistialuekartta, sulje UEFI-palvelut ja käynnistä ydin. */
 static efi_status exit_boot_services_and_enter(efi_handle image,
                                                uint64_t entry_address,
                                                uint64_t kernel_base,
@@ -536,6 +557,7 @@ static efi_status exit_boot_services_and_enter(efi_handle image,
     boot_info->framebuffer_format = 0;
     get_framebuffer_info(boot_info);
 
+    /* UEFI voi muuttaa karttaa; yritä uudestaan, jos avain vanheni. */
     for (;;) {
         map_size = map_capacity;
         status = boot_services->get_memory_map(&map_size, memory_map, &map_key,
@@ -574,6 +596,7 @@ static efi_status exit_boot_services_and_enter(efi_handle image,
     }
 }
 
+/* UEFI-ohjelman aloituskohta: lue, tarkista ja käynnistä kernel.elf. */
 efi_status efi_main(efi_handle image, struct efi_system_table *table) {
     uint8_t *kernel_file = 0;
     uint64_t kernel_file_size = 0;
