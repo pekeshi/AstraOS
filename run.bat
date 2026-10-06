@@ -37,6 +37,8 @@ qemu-system-x86_64 ^
     -drive "if=pflash,format=raw,readonly=on,file=%OVMF_CODE%" ^
     -drive "if=pflash,format=raw,file=%OVMF_VARS_COPY%" ^
     -drive "format=raw,file=fat:rw:%ESP_PATH%" ^
+    -device qemu-xhci,id=xhci ^
+    -device usb-kbd,bus=xhci.0 ^
     -serial stdio ^
     -no-reboot
 exit /b %errorlevel%

@@ -1,6 +1,7 @@
 #include "boot_info.h"
 #include "acpi.h"
 #include "pmm.h"
+#include "xhci.h"
 
 /* I/O-porttien käyttöön ei tarvita C-kirjastoa. */
 typedef unsigned char uint8_t;
@@ -425,6 +426,11 @@ static int keyboard_read_char(void) {
     static int shift_pressed;
     static int extended;
     uint8_t scan_code;
+    int usb_character = xhci_read_char();
+
+    if (usb_character >= 0) {
+        return usb_character;
+    }
 
     if ((inb(0x64) & 0x01) == 0) {
         return -1;
@@ -683,6 +689,15 @@ void kernel_main(struct boot_info *boot_info) {
     physical_allocator_ready = pmm_init(boot_info);
     if (!physical_allocator_ready) {
         serial_write("Error: could not initialize the physical page allocator.\r\n");
+    } else {
+        enum xhci_init_status usb_status = xhci_init();
+        if (usb_status == XHCI_INIT_READY) {
+            serial_write("USB keyboard ready (xHCI).\r\n");
+        } else if (usb_status == XHCI_INIT_FAILED) {
+            serial_write("Error: xHCI controller or port initialization failed.\r\n");
+        } else if (usb_status == XHCI_INIT_NO_KEYBOARD) {
+            serial_write("USB keyboard not found on xHCI root ports.\r\n");
+        }
     }
 
     serial_shell();

@@ -59,7 +59,13 @@ if errorlevel 1 (
     exit /b 1
 )
 
-"%ELF_BIN%\x86_64-elf-gcc.exe" -nostdlib -no-pie -Wl,-T,src\kernel.ld -Wl,--build-id=none -Wl,-z,max-page-size=0x1000 -o "out\kernel\kernel.elf" "out\kernel\kernel.o" "out\kernel\pmm.o" "out\kernel\acpi.o"
+"%ELF_BIN%\x86_64-elf-gcc.exe" -std=c11 -O2 -Wall -Wextra -Werror -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -fno-pie -fno-asynchronous-unwind-tables -fno-unwind-tables -mno-red-zone -mcmodel=small -c "src\xhci.c" -o "out\kernel\xhci.o"
+if errorlevel 1 (
+    echo Error: Failed to compile xHCI USB keyboard support.
+    exit /b 1
+)
+
+"%ELF_BIN%\x86_64-elf-gcc.exe" -nostdlib -no-pie -Wl,-T,src\kernel.ld -Wl,--build-id=none -Wl,-z,max-page-size=0x1000 -o "out\kernel\kernel.elf" "out\kernel\kernel.o" "out\kernel\pmm.o" "out\kernel\acpi.o" "out\kernel\xhci.o"
 if errorlevel 1 (
     echo Error: Failed to link the ELF64 kernel.
     exit /b 1

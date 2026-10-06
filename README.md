@@ -68,8 +68,19 @@ UEFI memory map and framebuffer address, dimensions, stride, and pixel format.
 The kernel starts on its own stack. Build on that foundation:
 
 1. Add GDT, IDT, and exception handlers so faults can be diagnosed.
-2. Add a timer and interrupt-driven keyboard input after the basic exception
-   setup.
+2. Add a timer and interrupt-driven input, then extend USB support for hubs and
+   hot-plugged devices.
 
 After `ExitBootServices`, the kernel must not call UEFI boot services. Keep the
 kernel freestanding: it has no C library or normal operating system to rely on.
+
+The kernel includes an initial polled xHCI driver for USB HID boot-protocol
+keyboards connected directly to an xHCI root port. It does not yet support USB
+hubs, hot-plug, non-boot HID keyboards, or controllers whose MMIO BAR is not
+identity-mapped by the firmware. Existing PS/2 and COM1 input remain available
+as fallbacks. The xHCI controller and DMA buffers are accessed through the
+firmware's current physical identity mappings; the kernel does not yet manage
+its own page tables.
+
+The QEMU run script attaches a USB keyboard to an emulated xHCI controller.
+Click the QEMU display before typing; COM1 input remains a fallback.
