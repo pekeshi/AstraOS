@@ -40,6 +40,7 @@ enum xhci_port_stage {
 
 struct xhci_diagnostics {
     uint32_t pci_location;
+    uint32_t pci_identity;
     uint32_t controllers_scanned;
     uint32_t controllers_with_connected_ports;
     uint32_t controller_stage;
@@ -72,6 +73,7 @@ void xhci_get_diagnostics(struct xhci_diagnostics *diagnostics);
 uint32_t xhci_get_controller_diagnostic_count(void);
 int xhci_get_controller_diagnostics(
     uint32_t index, struct xhci_diagnostics *diagnostics);
+int xhci_keyboard_connected(void);
 int xhci_read_char(void);
 
 #endif

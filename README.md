@@ -61,6 +61,9 @@ MSYS2 firmware files
 is copied to `out\uefi` before each run. The UEFI console shows the loading
 message. Close the QEMU window to stop it.
 
+To create `out\AstraOS.iso` and boot it from QEMU, install xorriso and MSYS2
+mtools, then run `run-iso.bat`.
+
 ### Next milestones
 
 The loader passes a `boot_info` structure from `src/boot_info.h`, including the
@@ -68,19 +71,57 @@ UEFI memory map and framebuffer address, dimensions, stride, and pixel format.
 The kernel starts on its own stack. Build on that foundation:
 
 1. Add GDT, IDT, and exception handlers so faults can be diagnosed.
-2. Add a timer and interrupt-driven input, then extend USB support for hubs and
-   hot-plugged devices.
+2. Add a timer and interrupt-driven input, then extend USB support for hubs.
 
 After `ExitBootServices`, the kernel must not call UEFI boot services. Keep the
 kernel freestanding: it has no C library or normal operating system to rely on.
 
-The kernel includes an initial polled xHCI driver for USB HID boot-protocol
-keyboards connected directly to an xHCI root port. It does not yet support USB
-hubs, hot-plug, non-boot HID keyboards, or controllers whose MMIO BAR is not
-identity-mapped by the firmware. Existing PS/2 and COM1 input remain available
-as fallbacks. The xHCI controller and DMA buffers are accessed through the
-firmware's current physical identity mappings; the kernel does not yet manage
-its own page tables.
+The kernel first checks the standard 8042/PS/2-compatible keyboard interface,
+enables its keyboard port and scan-code translation, and requires a keyboard
+acknowledgement before treating it as available. This prevents a controller
+that is present without a keyboard from blocking USB discovery, while retaining
+firmware legacy keyboard emulation when it responds. If PS/2 initializes but
+produces no input, the kernel polls the USB path as well. USB uses a polled
+xHCI driver for HID boot-protocol keyboards connected directly to an xHCI root
+port; the kernel scans each PCI xHCI controller until it finds a keyboard.
+When no keyboard is attached, or the active keyboard is unplugged, the kernel
+retries discovery about once per second, so a keyboard can be moved between
+directly connected root ports without rebooting. Taking ownership of xHCI may
+disable firmware keyboard emulation. The xHCI driver does not yet support USB
+hubs, non-boot HID keyboards, or controllers whose MMIO BAR is not
+identity-mapped by the firmware. COM1 input remains available as a fallback.
+The xHCI controller and DMA buffers are accessed through the firmware's current
+physical identity mappings; the kernel does not yet manage its own page tables.
 
-The QEMU run script attaches a USB keyboard to an emulated xHCI controller.
-Click the QEMU display before typing; COM1 input remains a fallback.
+The PS/2-compatible path enables the first keyboard port and scan-code
+translation, confirms the keyboard responds, and polls for US set-1 scan codes
+with Shift and Caps Lock support. PS/2 is preferred when it returns a character;
+USB is initialized at startup and polled as a fallback.
+
+If keyboard discovery fails, the kernel prints xHCI diagnostics: the number of
+controllers scanned and with connected ports, the relevant controller's PCI
+location and initialization stage, root-port/connection/reset counts, the last
+relevant port's PORTSC value, speed, and reset stage, and the USB enumeration
+stage. It also lists every root port on the selected controller with its raw
+PORTSC value, reset outcome, and (for connected ports) the USB enumeration
+stage and last command completion. Controller stages identify BAR validation, PCI setup, capability
+discovery, firmware handoff, reset, DMA allocation, and controller start.
+Port stages distinguish no connection, debounce, connection loss, reset
+timeout, and link stabilization timeout. The xHCI driver waits for ports to
+settle after controller start, including ports that firmware had already
+powered. Enumeration stages 1-13 identify,
+in order: enable slot, allocate device buffers, address device, read the device
+descriptor header, read the complete device descriptor, read the configuration
+descriptor, validate configuration data, find a boot-keyboard interface, find
+its interrupt-IN endpoint, set configuration and boot protocol, allocate the
+interrupt ring, validate the endpoint interval, and configure the interrupt
+endpoint. The last command type and xHCI completion code are also printed.
+Stage 0 means no connected port completed reset and began enumeration.
+
+The QEMU run scripts disable the emulated PS/2 controller and attach an
+emulated xHCI controller with a USB keyboard, so typing in the QEMU display
+exercises the kernel's USB path directly. COM1 input remains available
+throughout. On physical hardware, connect a boot-protocol USB keyboard directly
+to an xHCI root port; USB hubs are not supported yet. The kernel initializes
+both available keyboard paths at startup, preferring PS/2 input and polling
+xHCI when PS/2 has no character to return.

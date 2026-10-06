@@ -20,6 +20,7 @@ typedef unsigned short uint16_t;
 static volatile unsigned int kernel_boot_count;
 static int physical_allocator_ready;
 static int ps2_keyboard_ready;
+static int usb_keyboard_ready;
 static const struct boot_info *kernel_boot_info;
 static const struct boot_info *console_boot_info;
 static uint32_t console_cursor_x;
@@ -28,7 +29,7 @@ static int console_enabled;
 #define SHELL_LINE_CAPACITY 80
 
 static void console_write_char(char character);
-static int initialize_usb_keyboard(void);
+static int initialize_usb_keyboard(int report_failure);
 
 /* Kirjoita ja lue yhden tavun arvo x86:n I/O-portista. */
 static inline void outb(uint16_t port, uint8_t value) {
@@ -434,7 +435,20 @@ static int keyboard_read_char(void) {
     return xhci_read_char();
 }
 
+static uint16_t pit_read_counter(void) {
+    uint16_t count;
+
+    outb(0x43, 0x00);
+    count = inb(0x40);
+    count |= (uint16_t)inb(0x40) << 8;
+    return count;
+}
+
 static int read_input_char(int *from_serial) {
+    uint16_t previous_pit_count = pit_read_counter();
+    uint32_t elapsed_pit_ticks = 0;
+    uint32_t idle_polls = 0;
+
     for (;;) {
         int character = keyboard_read_char();
 
@@ -445,6 +459,24 @@ static int read_input_char(int *from_serial) {
         if ((inb(0x3FD) & 0x01) != 0) {
             *from_serial = 1;
             return (unsigned char)inb(0x3F8);
+        }
+        if (++idle_polls == 256) {
+            uint16_t pit_count = pit_read_counter();
+            uint16_t elapsed = (uint16_t)(previous_pit_count - pit_count);
+
+            idle_polls = 0;
+            previous_pit_count = pit_count;
+            elapsed_pit_ticks += elapsed;
+            if (usb_keyboard_ready && !xhci_keyboard_connected()) {
+                usb_keyboard_ready = 0;
+                serial_write("USB keyboard disconnected; watching for hot-plug...\r\n");
+            }
+            if (elapsed_pit_ticks >= 1193182U) {
+                elapsed_pit_ticks -= 1193182U;
+                if (!usb_keyboard_ready && physical_allocator_ready) {
+                    (void)initialize_usb_keyboard(0);
+                }
+            }
         }
     }
 }
@@ -642,7 +674,7 @@ static const char *xhci_port_stage_name(uint32_t stage) {
     case XHCI_PORT_STAGE_RESET_TIMEOUT: return "port reset timed out";
     case XHCI_PORT_STAGE_NOT_ENABLED: return "reset ended without enabled port";
     case XHCI_PORT_STAGE_READY: return "port reset and enabled";
-    case XHCI_PORT_STAGE_POWER_TIMEOUT: return "port power stabilization timed out";
+    case XHCI_PORT_STAGE_POWER_TIMEOUT: return "port link stabilization timed out";
     default: return "not reached";
     }
 }
@@ -674,12 +706,17 @@ static void print_xhci_port_diagnostics(
     }
 }
 
-static int initialize_usb_keyboard(void) {
+static int initialize_usb_keyboard(int report_failure) {
     enum xhci_init_status usb_status = xhci_init();
 
     if (usb_status == XHCI_INIT_READY) {
+        usb_keyboard_ready = 1;
         serial_write("USB keyboard ready (xHCI).\r\n");
         return 1;
+    }
+    usb_keyboard_ready = 0;
+    if (!report_failure) {
+        return 0;
     }
     if (usb_status == XHCI_INIT_FAILED ||
         usb_status == XHCI_INIT_NO_KEYBOARD) {
@@ -693,6 +730,8 @@ static int initialize_usb_keyboard(void) {
         xhci_get_diagnostics(&diagnostics);
         serial_write("xHCI PCI location: ");
         serial_write_hex_u64(diagnostics.pci_location);
+        serial_write(", PCI vendor/device: ");
+        serial_write_hex_u64(diagnostics.pci_identity);
         serial_write(", controller stage: ");
         serial_write_u64(diagnostics.controller_stage);
         serial_write(" (");
@@ -752,6 +791,17 @@ static int initialize_usb_keyboard(void) {
                 if (xhci_get_controller_diagnostics(
                         i, &controller_diagnostics)) {
                     print_xhci_port_diagnostics(&controller_diagnostics);
+                    serial_write("    PCI vendor/device: ");
+                    serial_write_hex_u64(
+                        controller_diagnostics.pci_identity);
+                    serial_write(", CAPLENGTH: ");
+                    serial_write_u64(controller_diagnostics.cap_length);
+                    serial_write(", HCS_PARAMS1: ");
+                    serial_write_hex_u64(
+                        controller_diagnostics.hcs_params1);
+                    serial_write(", MMIO BAR: ");
+                    serial_write_hex_u64(controller_diagnostics.mmio_bar);
+                    serial_write(".\r\n");
                 }
             }
             if (diagnostics.controllers_scanned > controller_count) {
@@ -778,6 +828,7 @@ void kernel_main(struct boot_info *boot_info) {
     serial_write("Hello from the AstraOS C kernel.\r\n");
     ps2_keyboard_ready = ps2_keyboard_init();
     physical_allocator_ready = pmm_init(boot_info);
+    usb_keyboard_ready = 0;
     if (!physical_allocator_ready) {
         serial_write("Error: could not initialize the physical page allocator.\r\n");
         if (ps2_keyboard_ready) {
@@ -787,7 +838,7 @@ void kernel_main(struct boot_info *boot_info) {
         serial_write("Keyboard ready (PS/2-compatible, firmware route preserved).\r\n");
     }
     if (physical_allocator_ready) {
-        (void)initialize_usb_keyboard();
+        (void)initialize_usb_keyboard(1);
     }
 
     serial_shell();

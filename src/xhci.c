@@ -56,6 +56,7 @@ struct xhci_controller {
     uint32_t event_cycle;
     uint32_t slot_id;
     uint32_t endpoint_id;
+    uint32_t keyboard_port;
     uint32_t report_length;
     uint32_t keyboard_pending;
     uint32_t previous_keys[6];
@@ -297,6 +298,23 @@ static int wait_transfer(uint32_t endpoint, uint32_t *completion,
     }
     *residual = event.status & 0xFFFFFF;
     return 1;
+}
+
+static int poll_transfer(uint32_t endpoint, uint32_t *completion,
+                         uint32_t *residual) {
+    struct xhci_trb event;
+
+    while (pop_event(&event)) {
+        if (((event.control >> 10) & 0x3F) != 32 ||
+            (event.control >> 24) != controller.slot_id ||
+            ((event.control >> 16) & 0x1F) != endpoint) {
+            continue;
+        }
+        *completion = (event.status >> 24) & 0xFF;
+        *residual = event.status & 0xFFFFFF;
+        return 1;
+    }
+    return 0;
 }
 
 static int control_transfer(uint8_t request_type, uint8_t request,
@@ -724,18 +742,17 @@ static int handoff_to_os(volatile uint32_t *capability, uint32_t offset) {
         uint32_t next = (header >> 8) & 0xFF;
 
         if (id == 1) {
-            uint32_t legacy = read_reg(extended + 1);
-            write_reg(extended + 1, legacy | (1U << 24));
+            write_reg(extended, header | (1U << 24));
             for (uint32_t i = 0; i < XHCI_WAIT_LIMIT; ++i) {
-                legacy = read_reg(extended + 1);
-                if ((legacy & (1U << 16)) == 0) {
+                header = read_reg(extended);
+                if ((header & (1U << 16)) == 0) {
                     break;
                 }
             }
-            legacy = read_reg(extended + 1);
-            if ((legacy & (1U << 16)) != 0) {
+            if ((header & (1U << 16)) != 0) {
                 return 0;
             }
+            uint32_t legacy = read_reg(extended + 1);
             write_reg(extended + 1, legacy & 0xFFFF0000U);
             break;
         }
@@ -926,6 +943,7 @@ static int find_controller(void) {
             pci_xhci_found = 1;
             diagnostics.pci_location = ((uint32_t)bus << 16) |
                                        ((uint32_t)device << 8) | function;
+            diagnostics.pci_identity = identity;
             for (uint32_t i = 0; i < sizeof(controller); ++i) {
                 ((uint8_t *)&controller)[i] = 0;
             }
@@ -940,27 +958,22 @@ static int find_controller(void) {
 static enum xhci_init_status scan_controller_ports(void) {
     int connected = 0;
     int reset_succeeded = 0;
-    int ports_powered = 0;
 
     diagnostics.port_count = controller.max_ports;
     if (controller.port_power_control) {
         for (uint32_t port = 1; port <= controller.max_ports; ++port) {
             uint32_t port_status = read_portsc(port);
-
             if ((port_status & (1U << 9)) == 0) {
                 write_portsc(port, 1U << 9);
-                ports_powered = 1;
             }
         }
-        if (ports_powered) {
-            if (!wait_microframes(XHCI_PORT_DEBOUNCE_MICROFRAMES)) {
-                for (uint32_t port = 1; port <= controller.max_ports; ++port) {
-                    set_port_stage(port, XHCI_PORT_STAGE_POWER_TIMEOUT);
-                    diagnostics.port_status[port - 1] = read_portsc(port);
-                }
-                return XHCI_INIT_FAILED;
-            }
+    }
+    if (!wait_microframes(XHCI_PORT_DEBOUNCE_MICROFRAMES)) {
+        for (uint32_t port = 1; port <= controller.max_ports; ++port) {
+            set_port_stage(port, XHCI_PORT_STAGE_POWER_TIMEOUT);
+            diagnostics.port_status[port - 1] = read_portsc(port);
         }
+        return XHCI_INIT_FAILED;
     }
     for (uint32_t port = 1; port <= controller.max_ports; ++port) {
         uint32_t speed;
@@ -1005,6 +1018,7 @@ static enum xhci_init_status scan_controller_ports(void) {
         diagnostics.port_status[port - 1] = diagnostics.last_port_status;
         diagnostics.enumeration_stage = 0;
         if (usb_find_keyboard(port, speed)) {
+            controller.keyboard_port = port;
             return 1;
         }
         diagnostics.port_enumeration_stages[port - 1] =
@@ -1088,6 +1102,13 @@ enum xhci_init_status xhci_init(void) {
 
     while ((status = find_controller()) > 0) {
         uint32_t pci_location = diagnostics.pci_location;
+        uint32_t pci_identity = diagnostics.pci_identity;
+        uint32_t cap_length = diagnostics.cap_length;
+        uint32_t hcc_params = diagnostics.hcc_params;
+        uint32_t hcs_params1 = diagnostics.hcs_params1;
+        uint64_t mmio_bar = diagnostics.mmio_bar;
+        uint32_t doorbell_offset = diagnostics.doorbell_offset;
+        uint32_t runtime_offset = diagnostics.runtime_offset;
         enum xhci_init_status port_status;
 
         initialized_controller = 1;
@@ -1096,7 +1117,14 @@ enum xhci_init_status xhci_init(void) {
             ((uint8_t *)&diagnostics)[i] = 0;
         }
         diagnostics.pci_location = pci_location;
+        diagnostics.pci_identity = pci_identity;
         diagnostics.controller_stage = XHCI_CONTROLLER_STAGE_RUNNING;
+        diagnostics.cap_length = cap_length;
+        diagnostics.hcc_params = hcc_params;
+        diagnostics.hcs_params1 = hcs_params1;
+        diagnostics.mmio_bar = mmio_bar;
+        diagnostics.doorbell_offset = doorbell_offset;
+        diagnostics.runtime_offset = runtime_offset;
         port_status = scan_controller_ports();
         if (port_status == XHCI_INIT_READY) {
             return port_status;
@@ -1165,6 +1193,14 @@ int xhci_get_controller_diagnostics(
     return 1;
 }
 
+int xhci_keyboard_connected(void) {
+    if (controller.slot_id == 0 || controller.keyboard_port == 0 ||
+        controller.keyboard_port > controller.max_ports) {
+        return 0;
+    }
+    return (read_portsc(controller.keyboard_port) & 1U) != 0;
+}
+
 static int keycode_to_char(uint32_t key, uint8_t modifiers, uint8_t caps) {
     int shift = (modifiers & ((1U << 1) | (1U << 5))) != 0;
 
@@ -1219,7 +1255,7 @@ int xhci_read_char(void) {
         ring_doorbell(controller.slot_id, controller.endpoint_id);
         controller.keyboard_pending = 1;
     }
-    if (!wait_transfer(controller.endpoint_id, &completion, &residual)) {
+    if (!poll_transfer(controller.endpoint_id, &completion, &residual)) {
         return -1;
     }
     controller.keyboard_pending = 0;
