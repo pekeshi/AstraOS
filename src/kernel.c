@@ -1,6 +1,7 @@
 #include "boot_info.h"
 #include "acpi.h"
 #include "pmm.h"
+#include "ps2.h"
 #include "xhci.h"
 
 /* I/O-porttien käyttöön ei tarvita C-kirjastoa. */
@@ -18,6 +19,7 @@ typedef unsigned short uint16_t;
 
 static volatile unsigned int kernel_boot_count;
 static int physical_allocator_ready;
+static int ps2_keyboard_ready;
 static const struct boot_info *kernel_boot_info;
 static const struct boot_info *console_boot_info;
 static uint32_t console_cursor_x;
@@ -26,6 +28,7 @@ static int console_enabled;
 #define SHELL_LINE_CAPACITY 80
 
 static void console_write_char(char character);
+static int initialize_usb_keyboard(void);
 
 /* Kirjoita ja lue yhden tavun arvo x86:n I/O-portista. */
 static inline void outb(uint16_t port, uint8_t value) {
@@ -63,7 +66,7 @@ static void serial_init(void) {
     outb(0x3F9, 0x00);  /* Poista sarjaportin keskeytykset käytöstä. */
     outb(0x3FB, 0x80);  /* Ota baudinopeuden asetus käyttöön. */
     outb(0x3F8, 0x01);  /* Aseta nopeudeksi 115200 bittiä sekunnissa. */
-    outb(0x3F9, 0x00);
+    outb(0x3F9, 0x00);  /* Poista sarjaportin keskeytykset käytöstä. */
     outb(0x3FB, 0x03);  /* 8 databittiä, ei pariteettia, yksi stop-bitti. */
     outb(0x3FA, 0xC7);  /* Tyhjennä puskurit ja ota FIFO käyttöön. */
     outb(0x3FC, 0x0B);  /* Ota lähetys ja vastaanotto käyttöön. */
@@ -423,94 +426,12 @@ static void console_write_char(char character) {
 }
 
 static int keyboard_read_char(void) {
-    static int shift_pressed;
-    static int extended;
-    uint8_t scan_code;
-    int usb_character = xhci_read_char();
+    int ps2_character = ps2_keyboard_read_char();
 
-    if (usb_character >= 0) {
-        return usb_character;
+    if (ps2_character >= 0) {
+        return ps2_character;
     }
-
-    if ((inb(0x64) & 0x01) == 0) {
-        return -1;
-    }
-    scan_code = inb(0x60);
-    if (scan_code == 0xE0) {
-        extended = 1;
-        return -1;
-    }
-    if (extended) {
-        extended = 0;
-        return -1;
-    }
-    if (scan_code == 0x2A || scan_code == 0x36) {
-        shift_pressed = 1;
-        return -1;
-    }
-    if (scan_code == 0xAA || scan_code == 0xB6) {
-        shift_pressed = 0;
-        return -1;
-    }
-    if ((scan_code & 0x80) != 0) {
-        return -1;
-    }
-
-    switch (scan_code) {
-    case 0x01: return 0x1B;
-    case 0x02: return shift_pressed ? '!' : '1';
-    case 0x03: return shift_pressed ? '@' : '2';
-    case 0x04: return shift_pressed ? '#' : '3';
-    case 0x05: return shift_pressed ? '$' : '4';
-    case 0x06: return shift_pressed ? '%' : '5';
-    case 0x07: return shift_pressed ? '^' : '6';
-    case 0x08: return shift_pressed ? '&' : '7';
-    case 0x09: return shift_pressed ? '*' : '8';
-    case 0x0A: return shift_pressed ? '(' : '9';
-    case 0x0B: return shift_pressed ? ')' : '0';
-    case 0x0C: return shift_pressed ? '_' : '-';
-    case 0x0D: return shift_pressed ? '+' : '=';
-    case 0x0E: return '\b';
-    case 0x0F: return '\t';
-    case 0x10: return shift_pressed ? 'Q' : 'q';
-    case 0x11: return shift_pressed ? 'W' : 'w';
-    case 0x12: return shift_pressed ? 'E' : 'e';
-    case 0x13: return shift_pressed ? 'R' : 'r';
-    case 0x14: return shift_pressed ? 'T' : 't';
-    case 0x15: return shift_pressed ? 'Y' : 'y';
-    case 0x16: return shift_pressed ? 'U' : 'u';
-    case 0x17: return shift_pressed ? 'I' : 'i';
-    case 0x18: return shift_pressed ? 'O' : 'o';
-    case 0x19: return shift_pressed ? 'P' : 'p';
-    case 0x1A: return shift_pressed ? '{' : '[';
-    case 0x1B: return shift_pressed ? '}' : ']';
-    case 0x1C: return '\r';
-    case 0x1E: return shift_pressed ? 'A' : 'a';
-    case 0x1F: return shift_pressed ? 'S' : 's';
-    case 0x20: return shift_pressed ? 'D' : 'd';
-    case 0x21: return shift_pressed ? 'F' : 'f';
-    case 0x22: return shift_pressed ? 'G' : 'g';
-    case 0x23: return shift_pressed ? 'H' : 'h';
-    case 0x24: return shift_pressed ? 'J' : 'j';
-    case 0x25: return shift_pressed ? 'K' : 'k';
-    case 0x26: return shift_pressed ? 'L' : 'l';
-    case 0x27: return shift_pressed ? ':' : ';';
-    case 0x28: return shift_pressed ? '"' : '\'';
-    case 0x29: return shift_pressed ? '~' : '`';
-    case 0x2B: return shift_pressed ? '|' : '\\';
-    case 0x2C: return shift_pressed ? 'Z' : 'z';
-    case 0x2D: return shift_pressed ? 'X' : 'x';
-    case 0x2E: return shift_pressed ? 'C' : 'c';
-    case 0x2F: return shift_pressed ? 'V' : 'v';
-    case 0x30: return shift_pressed ? 'B' : 'b';
-    case 0x31: return shift_pressed ? 'N' : 'n';
-    case 0x32: return shift_pressed ? 'M' : 'm';
-    case 0x33: return shift_pressed ? '<' : ',';
-    case 0x34: return shift_pressed ? '>' : '.';
-    case 0x35: return shift_pressed ? '?' : '/';
-    case 0x39: return ' ';
-    default: return -1;
-    }
+    return xhci_read_char();
 }
 
 static int read_input_char(int *from_serial) {
@@ -678,6 +599,175 @@ static void serial_shell(void) {
     }
 }
 
+static const char *xhci_stage_name(uint32_t stage) {
+    switch (stage) {
+    case 1: return "enable slot";
+    case 2: return "allocate device buffers";
+    case 3: return "address device";
+    case 4: return "read device descriptor header";
+    case 5: return "read complete device descriptor";
+    case 6: return "read configuration descriptor";
+    case 7: return "validate configuration descriptor";
+    case 8: return "find boot-keyboard interface";
+    case 9: return "find interrupt-IN endpoint";
+    case 10: return "set configuration and boot protocol";
+    case 11: return "allocate interrupt ring";
+    case 12: return "validate endpoint interval";
+    case 13: return "configure interrupt endpoint";
+    default: return "scan or port reset";
+    }
+}
+
+static const char *xhci_controller_stage_name(uint32_t stage) {
+    switch (stage) {
+    case XHCI_CONTROLLER_STAGE_VALIDATE_BAR: return "validate PCI BAR";
+    case XHCI_CONTROLLER_STAGE_ENABLE_PCI: return "enable PCI memory and bus mastering";
+    case XHCI_CONTROLLER_STAGE_VALIDATE_CAPABILITIES: return "read controller capabilities";
+    case XHCI_CONTROLLER_STAGE_FIRMWARE_HANDOFF: return "firmware ownership handoff";
+    case XHCI_CONTROLLER_STAGE_RESET: return "stop/reset controller";
+    case XHCI_CONTROLLER_STAGE_ALLOCATE_RINGS: return "allocate controller rings";
+    case XHCI_CONTROLLER_STAGE_ALLOCATE_SCRATCHPADS: return "allocate scratchpads";
+    case XHCI_CONTROLLER_STAGE_START: return "start controller";
+    case XHCI_CONTROLLER_STAGE_RUNNING: return "controller running";
+    default: return "not reached";
+    }
+}
+
+static const char *xhci_port_stage_name(uint32_t stage) {
+    switch (stage) {
+    case XHCI_PORT_STAGE_NO_CONNECTION: return "no connected root port";
+    case XHCI_PORT_STAGE_DEBOUNCE: return "debouncing connected port";
+    case XHCI_PORT_STAGE_CONNECTION_LOST: return "connection lost during debounce";
+    case XHCI_PORT_STAGE_RESET: return "waiting for port reset";
+    case XHCI_PORT_STAGE_RESET_TIMEOUT: return "port reset timed out";
+    case XHCI_PORT_STAGE_NOT_ENABLED: return "reset ended without enabled port";
+    case XHCI_PORT_STAGE_READY: return "port reset and enabled";
+    case XHCI_PORT_STAGE_POWER_TIMEOUT: return "port power stabilization timed out";
+    default: return "not reached";
+    }
+}
+
+static void print_xhci_port_diagnostics(
+    const struct xhci_diagnostics *diagnostics) {
+    serial_write("Controller ");
+    serial_write_hex_u64(diagnostics->pci_location);
+    serial_write(" root-port scan:\r\n");
+    for (uint32_t i = 0; i < diagnostics->port_count; ++i) {
+        serial_write("  Port ");
+        serial_write_u64(i + 1);
+        serial_write(": PORTSC=");
+        serial_write_hex_u64(diagnostics->port_status[i]);
+        serial_write(", ");
+        serial_write(xhci_port_stage_name(diagnostics->port_stages[i]));
+        if (diagnostics->port_enumeration_stages[i] != 0) {
+            serial_write(", enumeration stage=");
+            serial_write_u64(diagnostics->port_enumeration_stages[i]);
+            serial_write(" (");
+            serial_write(xhci_stage_name(
+                diagnostics->port_enumeration_stages[i]));
+            serial_write("), command=");
+            serial_write_u64(diagnostics->port_command_types[i]);
+            serial_write(", completion=");
+            serial_write_u64(diagnostics->port_completion_codes[i]);
+        }
+        serial_write(".\r\n");
+    }
+}
+
+static int initialize_usb_keyboard(void) {
+    enum xhci_init_status usb_status = xhci_init();
+
+    if (usb_status == XHCI_INIT_READY) {
+        serial_write("USB keyboard ready (xHCI).\r\n");
+        return 1;
+    }
+    if (usb_status == XHCI_INIT_FAILED ||
+        usb_status == XHCI_INIT_NO_KEYBOARD) {
+        struct xhci_diagnostics diagnostics;
+
+        if (usb_status == XHCI_INIT_FAILED) {
+            serial_write("Error: xHCI initialization failed.\r\n");
+        } else {
+            serial_write("USB keyboard not found on xHCI root ports.\r\n");
+        }
+        xhci_get_diagnostics(&diagnostics);
+        serial_write("xHCI PCI location: ");
+        serial_write_hex_u64(diagnostics.pci_location);
+        serial_write(", controller stage: ");
+        serial_write_u64(diagnostics.controller_stage);
+        serial_write(" (");
+        serial_write(xhci_controller_stage_name(diagnostics.controller_stage));
+        serial_write(")");
+        serial_write(", controllers scanned: ");
+        serial_write_u64(diagnostics.controllers_scanned);
+        serial_write(", controllers with connected ports: ");
+        serial_write_u64(diagnostics.controllers_with_connected_ports);
+        serial_write(", ports: ");
+        serial_write_u64(diagnostics.port_count);
+        serial_write(", connected: ");
+        serial_write_u64(diagnostics.connected_ports);
+        serial_write(", reset: ");
+        serial_write_u64(diagnostics.reset_ports);
+        serial_write("\r\nLast port: ");
+        serial_write_u64(diagnostics.last_port);
+        serial_write(", PORTSC: ");
+        serial_write_hex_u64(diagnostics.last_port_status);
+        serial_write(", port stage: ");
+        serial_write_u64(diagnostics.port_stage);
+        serial_write(" (");
+        serial_write(xhci_port_stage_name(diagnostics.port_stage));
+        serial_write(")");
+        serial_write(", speed: ");
+        serial_write_u64(diagnostics.last_speed);
+        serial_write(", enumeration stage: ");
+        serial_write_u64(diagnostics.enumeration_stage);
+        serial_write(" (");
+        serial_write(xhci_stage_name(diagnostics.enumeration_stage));
+        serial_write("), command: ");
+        serial_write_u64(diagnostics.last_command_type);
+        serial_write(", completion code: ");
+        serial_write_u64(diagnostics.last_completion_code);
+        serial_write(".\r\n");
+        /* Print raw capability/register values to aid debugging BAR/MMIO issues. */
+        serial_write("CAPLENGTH: ");
+        serial_write_u64(diagnostics.cap_length);
+        serial_write(", HCC_PARAMS: ");
+        serial_write_hex_u64(diagnostics.hcc_params);
+        serial_write(", HCS_PARAMS1: ");
+        serial_write_hex_u64(diagnostics.hcs_params1);
+        serial_write("\r\nMMIO BAR: ");
+        serial_write_hex_u64(diagnostics.mmio_bar);
+        serial_write(", doorbell offset: ");
+        serial_write_hex_u64(diagnostics.doorbell_offset);
+        serial_write(", runtime offset: ");
+        serial_write_hex_u64(diagnostics.runtime_offset);
+        serial_write("\r\n");
+        {
+            uint32_t controller_count =
+                xhci_get_controller_diagnostic_count();
+
+            for (uint32_t i = 0; i < controller_count; ++i) {
+                struct xhci_diagnostics controller_diagnostics;
+
+                if (xhci_get_controller_diagnostics(
+                        i, &controller_diagnostics)) {
+                    print_xhci_port_diagnostics(&controller_diagnostics);
+                }
+            }
+            if (diagnostics.controllers_scanned > controller_count) {
+                serial_write("Per-port diagnostics retained for ");
+                serial_write_u64(controller_count);
+                serial_write(" controllers; total scanned: ");
+                serial_write_u64(diagnostics.controllers_scanned);
+                serial_write(".\r\n");
+            }
+        }
+        return 0;
+    }
+    serial_write("Error: no xHCI controller was found.\r\n");
+    return 0;
+}
+
 __attribute__((noreturn))
 void kernel_main(struct boot_info *boot_info) {
     /* Pidä nollattava muuttuja mukana ytimen BSS-osiossa. */
@@ -686,18 +776,18 @@ void kernel_main(struct boot_info *boot_info) {
     serial_init();
     draw_kernel_message(boot_info);
     serial_write("Hello from the AstraOS C kernel.\r\n");
+    ps2_keyboard_ready = ps2_keyboard_init();
     physical_allocator_ready = pmm_init(boot_info);
     if (!physical_allocator_ready) {
         serial_write("Error: could not initialize the physical page allocator.\r\n");
-    } else {
-        enum xhci_init_status usb_status = xhci_init();
-        if (usb_status == XHCI_INIT_READY) {
-            serial_write("USB keyboard ready (xHCI).\r\n");
-        } else if (usb_status == XHCI_INIT_FAILED) {
-            serial_write("Error: xHCI controller or port initialization failed.\r\n");
-        } else if (usb_status == XHCI_INIT_NO_KEYBOARD) {
-            serial_write("USB keyboard not found on xHCI root ports.\r\n");
+        if (ps2_keyboard_ready) {
+            serial_write("Keyboard ready (PS/2-compatible, firmware route preserved).\r\n");
         }
+    } else if (ps2_keyboard_ready) {
+        serial_write("Keyboard ready (PS/2-compatible, firmware route preserved).\r\n");
+    }
+    if (physical_allocator_ready) {
+        (void)initialize_usb_keyboard();
     }
 
     serial_shell();

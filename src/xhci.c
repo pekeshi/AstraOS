@@ -10,6 +10,8 @@
 #define XHCI_RING_TRBS 256U
 #define XHCI_EVENT_TRBS 256U
 #define XHCI_WAIT_LIMIT 4000000U
+#define XHCI_MICROFRAME_WAIT_LIMIT 20000000U
+#define XHCI_PORT_DEBOUNCE_MICROFRAMES 800U
 #define TRB_CYCLE 1U
 #define TRB_TOGGLE_CYCLE (1U << 1)
 #define TRB_CHAIN (1U << 4)
@@ -37,13 +39,19 @@ struct xhci_ring {
 struct xhci_controller {
     volatile uint32_t *operational;
     volatile uint32_t *doorbells;
+    volatile uint32_t *runtime_base;
     volatile uint32_t *runtime;
     uint32_t max_ports;
     uint32_t max_slots;
     uint32_t context_size;
+    uint32_t port_power_control;
     uint32_t max_packet0;
     uint32_t supports_64bit_dma;
     uint32_t scratchpad_count;
+    uint64_t dcbaa_physical;
+    uint64_t event_ring_physical;
+    uint64_t erst_physical;
+    uint64_t scratchpad_array_physical;
     uint32_t event_index;
     uint32_t event_cycle;
     uint32_t slot_id;
@@ -63,6 +71,12 @@ struct xhci_controller {
 };
 
 static struct xhci_controller controller;
+static struct xhci_diagnostics diagnostics;
+static struct xhci_diagnostics
+    controller_diagnostics[XHCI_MAX_DIAGNOSTIC_CONTROLLERS];
+static uint32_t controller_diagnostic_count;
+static uint32_t pci_scan_index;
+static int pci_xhci_found;
 
 static inline void io_out32(uint16_t port, uint32_t value) {
     __asm__ volatile ("outl %0, %1" : : "a"(value), "Nd"(port));
@@ -125,6 +139,19 @@ static int wait_reg(volatile uint32_t *address, uint32_t mask,
                     uint32_t expected) {
     for (uint32_t i = 0; i < XHCI_WAIT_LIMIT; ++i) {
         if ((read_reg(address) & mask) == expected) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int wait_microframes(uint32_t microframes) {
+    uint32_t start = read_reg(controller.runtime_base);
+
+    for (uint32_t i = 0; i < XHCI_MICROFRAME_WAIT_LIMIT; ++i) {
+        uint32_t current = read_reg(controller.runtime_base);
+
+        if (((current - start) & 0x3FFFU) >= microframes) {
             return 1;
         }
     }
@@ -232,7 +259,11 @@ static int wait_command(uint32_t *slot_out) {
     uint32_t completion;
     struct xhci_trb event;
 
-    if (!next_event(33, &completion, &event) || completion != 1) {
+    if (!next_event(33, &completion, &event)) {
+        return 0;
+    }
+    diagnostics.last_completion_code = completion;
+    if (completion != 1) {
         return 0;
     }
     if (slot_out != 0) {
@@ -245,6 +276,8 @@ static int command(uint32_t type, uint64_t parameter, uint32_t status,
                    uint32_t control, uint32_t *slot_out) {
     struct xhci_trb trb;
 
+    diagnostics.last_command_type = type;
+    diagnostics.last_completion_code = 0;
     trb.parameter = parameter;
     trb.status = status;
     trb.control = (type << 10) | control;
@@ -404,6 +437,9 @@ static int setup_interrupt_endpoint(uint8_t endpoint_address,
 }
 
 static void release_keyboard_candidate(void) {
+    uint32_t last_command_type = diagnostics.last_command_type;
+    uint32_t last_completion_code = diagnostics.last_completion_code;
+
     if (controller.slot_id != 0) {
         controller.device_context_array[controller.slot_id] = 0;
         (void)command(10, 0, 0, controller.slot_id << 24, 0);
@@ -429,6 +465,8 @@ static void release_keyboard_candidate(void) {
     controller.device_context = 0;
     controller.control_ring.physical = 0;
     controller.interrupt_ring.physical = 0;
+    diagnostics.last_command_type = last_command_type;
+    diagnostics.last_completion_code = last_completion_code;
 }
 
 static uint32_t read_portsc(uint32_t port) {
@@ -439,11 +477,28 @@ static void write_portsc(uint32_t port, uint32_t value) {
     write_reg(controller.operational + (0x400 / 4) + (port - 1) * 4, value);
 }
 
+static void set_port_stage(uint32_t port, uint32_t stage) {
+    diagnostics.port_stage = stage;
+    if (port != 0 && port <= XHCI_MAX_PORTS) {
+        diagnostics.port_stages[port - 1] = stage;
+    }
+}
+
 static int reset_port(uint32_t port, uint32_t *speed_out) {
     uint32_t status = read_portsc(port);
     int reset_complete = 0;
 
     if ((status & 1U) == 0) {
+        set_port_stage(port, XHCI_PORT_STAGE_NO_CONNECTION);
+        return 0;
+    }
+    set_port_stage(port, XHCI_PORT_STAGE_DEBOUNCE);
+    if (!wait_microframes(XHCI_PORT_DEBOUNCE_MICROFRAMES)) {
+        return 0;
+    }
+    status = read_portsc(port);
+    if ((status & 1U) == 0) {
+        set_port_stage(port, XHCI_PORT_STAGE_CONNECTION_LOST);
         return 0;
     }
     if ((status & (1U << 9)) == 0) {
@@ -453,6 +508,7 @@ static int reset_port(uint32_t port, uint32_t *speed_out) {
     }
     status = read_portsc(port);
     *speed_out = (status >> 10) & 0x0F;
+    set_port_stage(port, XHCI_PORT_STAGE_RESET);
     if (*speed_out >= 4) {
         write_portsc(port, (1U << 9) | (1U << 31) |
                      (status & (0x7FU << 17)));
@@ -478,7 +534,16 @@ static int reset_port(uint32_t port, uint32_t *speed_out) {
     }
     status = read_portsc(port);
     *speed_out = (status >> 10) & 0x0F;
-    return reset_complete && (status & 3U) == 3U && *speed_out != 0;
+    if (!reset_complete) {
+        set_port_stage(port, XHCI_PORT_STAGE_RESET_TIMEOUT);
+        return 0;
+    }
+    if ((status & 3U) != 3U || *speed_out == 0) {
+        set_port_stage(port, XHCI_PORT_STAGE_NOT_ENABLED);
+        return 0;
+    }
+    set_port_stage(port, XHCI_PORT_STAGE_READY);
+    return 1;
 }
 
 static int usb_find_keyboard(uint32_t port, uint32_t speed) {
@@ -492,12 +557,14 @@ static int usb_find_keyboard(uint32_t port, uint32_t speed) {
     uint32_t configuration_value = 0;
     uint32_t total_length;
     uint32_t interface_is_keyboard = 0;
+    uint32_t max_packet0;
     uint64_t device_context;
     uint64_t input_context_address;
     uint64_t ring;
     uint64_t report;
     uint32_t descriptor_offset;
 
+    diagnostics.enumeration_stage = 1;
     if (!command(9, 0, 0, 0, &slot) || slot == 0 ||
         slot > controller.max_slots) {
         return 0;
@@ -509,6 +576,7 @@ static int usb_find_keyboard(uint32_t port, uint32_t speed) {
     report = allocate_page();
     if (device_context == 0 || input_context_address == 0 ||
         ring == 0 || report == 0) {
+        diagnostics.enumeration_stage = 2;
         if (device_context != 0) {
             pmm_free_page(device_context);
         }
@@ -532,18 +600,29 @@ static int usb_find_keyboard(uint32_t port, uint32_t speed) {
 
     /* Address Device needs an input context and a transfer ring for EP0. */
     controller.input_context = (uint8_t *)(uintptr_t)input_context_address;
+    diagnostics.enumeration_stage = 3;
     if (!set_address((uint8_t)speed, port)) {
         goto failed;
     }
+    diagnostics.enumeration_stage = 4;
     if (!control_transfer(0x80, 6, 0x0100, 0, device_descriptor, 8) ||
         device_descriptor[0] < 8 || device_descriptor[1] != 1) {
         goto failed;
     }
-    if (!update_ep0_packet_size(device_descriptor[7]) ||
+    max_packet0 = device_descriptor[7];
+    if (speed >= 4) {
+        if (max_packet0 != 9) {
+            goto failed;
+        }
+        max_packet0 = 1U << max_packet0;
+    }
+    if (!update_ep0_packet_size(max_packet0) ||
         !control_transfer(0x80, 6, 0x0100, 0,
                           device_descriptor, sizeof(device_descriptor))) {
+        diagnostics.enumeration_stage = 5;
         goto failed;
     }
+    diagnostics.enumeration_stage = 6;
     if (!control_transfer(0x80, 6, 0x0200, 0,
                           configuration, sizeof(configuration))) {
         goto failed;
@@ -552,8 +631,10 @@ static int usb_find_keyboard(uint32_t port, uint32_t speed) {
     configuration_value = configuration[5];
     if (configuration[0] < 9 || configuration[1] != 2 ||
         total_length > sizeof(configuration) || total_length < 9) {
+        diagnostics.enumeration_stage = 7;
         goto failed;
     }
+    diagnostics.enumeration_stage = 8;
     for (descriptor_offset = 0; descriptor_offset + 2 <= total_length;) {
         uint8_t descriptor_length = configuration[descriptor_offset];
         uint8_t descriptor_type = configuration[descriptor_offset + 1];
@@ -584,12 +665,15 @@ static int usb_find_keyboard(uint32_t port, uint32_t speed) {
     }
     if (endpoint_address == 0 || endpoint_packet < 8 ||
         endpoint_packet > PAGE_SIZE || configuration_value == 0) {
+        diagnostics.enumeration_stage = 9;
         goto failed;
     }
+    diagnostics.enumeration_stage = 10;
     if (!control_transfer(0, 9, (uint16_t)configuration_value, 0, 0, 0) ||
         !control_transfer(0x21, 0x0B, 0, (uint16_t)interface_number, 0, 0)) {
         goto failed;
     }
+    diagnostics.enumeration_stage = 11;
     ring = allocate_page();
     if (ring == 0) {
         goto failed;
@@ -609,8 +693,10 @@ static int usb_find_keyboard(uint32_t port, uint32_t speed) {
         endpoint_interval = interval;
     }
     if (endpoint_interval == 0 || endpoint_interval > 15) {
+        diagnostics.enumeration_stage = 12;
         goto failed;
     }
+    diagnostics.enumeration_stage = 13;
     if (!setup_interrupt_endpoint((uint8_t)endpoint_address,
                                   (uint16_t)endpoint_packet,
                                   (uint8_t)endpoint_interval)) {
@@ -681,10 +767,12 @@ static int initialize_controller(uint8_t bus, uint8_t device,
     struct xhci_erst_entry *erst_entry;
     uint32_t slots;
     uint32_t ports;
+    uint32_t hcs_params1;
     uint32_t runtime_offset;
     uint32_t doorbell_offset;
     uint64_t scratchpad_array = 0;
 
+    diagnostics.controller_stage = XHCI_CONTROLLER_STAGE_VALIDATE_BAR;
     bar_type = (bar_low >> 1) & 3;
     if ((bar_low & 1) != 0 || (bar_type != 0 && bar_type != 2)) {
         return 0;
@@ -696,34 +784,53 @@ static int initialize_controller(uint8_t bus, uint8_t device,
     if (bar == 0) {
         return 0;
     }
+    diagnostics.controller_stage = XHCI_CONTROLLER_STAGE_ENABLE_PCI;
     command_register = pci_read32(bus, device, function, 4);
     pci_write16(bus, device, function, 4,
                 (uint16_t)(command_register | (1U << 1) | (1U << 2)));
 
     capability = (volatile uint32_t *)(uintptr_t)bar;
+    diagnostics.controller_stage =
+        XHCI_CONTROLLER_STAGE_VALIDATE_CAPABILITIES;
     cap_length = *(volatile uint8_t *)(uintptr_t)bar;
     hcc_params = read_reg(capability + 4);
-    slots = read_reg(capability + 1) & 0xFF;
-    ports = read_reg(capability + 1) >> 24;
+    hcs_params1 = read_reg(capability + 1);
+    slots = hcs_params1 & 0xFF;
+    ports = hcs_params1 >> 24;
+
+    /* Expose raw capability/register values for post-mortem diagnostics. */
+    diagnostics.cap_length = cap_length;
+    diagnostics.hcc_params = hcc_params;
+    diagnostics.hcs_params1 = hcs_params1;
+    diagnostics.mmio_bar = bar;
+
     if (cap_length < 0x20 || slots == 0 || ports == 0) {
         return 0;
     }
     controller.operational = (volatile uint32_t *)(uintptr_t)(bar + cap_length);
     doorbell_offset = read_reg(capability + 5) & ~3U;
     runtime_offset = read_reg(capability + 6) & ~0x1FU;
+
+    diagnostics.doorbell_offset = doorbell_offset;
+    diagnostics.runtime_offset = runtime_offset;
+
     controller.doorbells =
         (volatile uint32_t *)(uintptr_t)(bar + doorbell_offset);
-    controller.runtime =
-        (volatile uint32_t *)(uintptr_t)(bar + runtime_offset + 0x20);
+    controller.runtime_base =
+        (volatile uint32_t *)(uintptr_t)(bar + runtime_offset);
+    controller.runtime = controller.runtime_base + 0x20 / sizeof(uint32_t);
     controller.max_ports = ports;
     controller.max_slots = slots;
     controller.context_size = (hcc_params & (1U << 2)) != 0 ? 64 : 32;
+    controller.port_power_control = (hcc_params >> 3) & 1U;
     controller.supports_64bit_dma = hcc_params & 1U;
 
+    diagnostics.controller_stage = XHCI_CONTROLLER_STAGE_FIRMWARE_HANDOFF;
     if (!handoff_to_os(capability, ((hcc_params >> 16) & 0xFFFF) * 4)) {
         return 0;
     }
 
+    diagnostics.controller_stage = XHCI_CONTROLLER_STAGE_RESET;
     if ((read_reg(controller.operational) & 1) != 0) {
         write_reg(controller.operational, read_reg(controller.operational) & ~1U);
         if (!wait_reg(controller.operational + 1, 1, 1)) {
@@ -737,6 +844,7 @@ static int initialize_controller(uint8_t bus, uint8_t device,
     }
     controller.max_slots = slots < 32 ? slots : 32;
 
+    diagnostics.controller_stage = XHCI_CONTROLLER_STAGE_ALLOCATE_RINGS;
     dcbaa = allocate_page();
     command_ring = allocate_page();
     event_ring = allocate_page();
@@ -745,11 +853,16 @@ static int initialize_controller(uint8_t bus, uint8_t device,
         return 0;
     }
     controller.device_context_array = (uint64_t *)(uintptr_t)dcbaa;
+    controller.dcbaa_physical = dcbaa;
     controller.event_ring = (struct xhci_trb *)(uintptr_t)event_ring;
+    controller.event_ring_physical = event_ring;
+    controller.erst_physical = erst;
     controller.event_index = 0;
     controller.event_cycle = 1;
     ring_init(&controller.command_ring, command_ring);
 
+    diagnostics.controller_stage =
+        XHCI_CONTROLLER_STAGE_ALLOCATE_SCRATCHPADS;
     scratchpad_high = (read_reg(capability + 2) >> 27) & 0x1F;
     scratchpad_low = (read_reg(capability + 2) >> 21) & 0x1F;
     controller.scratchpad_count = (scratchpad_high << 5) | scratchpad_low;
@@ -761,6 +874,7 @@ static int initialize_controller(uint8_t bus, uint8_t device,
         if (scratchpad_array == 0) {
             return 0;
         }
+        controller.scratchpad_array_physical = scratchpad_array;
         controller.device_context_array[0] = scratchpad_array;
         for (uint32_t i = 0; i < controller.scratchpad_count; ++i) {
             uint64_t scratchpad = allocate_page();
@@ -783,72 +897,272 @@ static int initialize_controller(uint8_t bus, uint8_t device,
     write_reg(controller.operational + 0x18 / 4, (uint32_t)command_ring | 1U);
     write_reg(controller.operational + 0x1C / 4, (uint32_t)(command_ring >> 32));
     write_reg(controller.operational + 0x38 / 4, controller.max_slots);
+    diagnostics.controller_stage = XHCI_CONTROLLER_STAGE_START;
     write_reg(controller.operational, read_reg(controller.operational) | 1U);
-    return wait_reg(controller.operational + 1, 1, 0);
+    if (!wait_reg(controller.operational + 1, 1, 0)) {
+        return 0;
+    }
+    diagnostics.controller_stage = XHCI_CONTROLLER_STAGE_RUNNING;
+    return 1;
 }
 
 static int find_controller(void) {
-    int found_controller = 0;
+    while (pci_scan_index < 256U * 32U * 8U) {
+        uint32_t index = pci_scan_index++;
+        uint8_t bus = (uint8_t)(index >> 8);
+        uint8_t device = (uint8_t)((index >> 3) & 0x1F);
+        uint8_t function = (uint8_t)(index & 7);
+        uint32_t identity = pci_read32(bus, device, function, 0);
+        uint32_t class_code;
 
-    for (uint32_t bus = 0; bus < 256; ++bus) {
-        for (uint32_t device = 0; device < 32; ++device) {
-            for (uint32_t function = 0; function < 8; ++function) {
-                uint32_t identity = pci_read32((uint8_t)bus, (uint8_t)device,
-                                               (uint8_t)function, 0);
-                uint32_t class_code;
-
-                if ((identity & 0xFFFF) == 0xFFFF) {
-                    if (function == 0) {
-                        break;
-                    }
-                    continue;
-                }
-                class_code = pci_read32((uint8_t)bus, (uint8_t)device,
-                                        (uint8_t)function, 8);
-                if ((class_code >> 8) == 0x0C0330) {
-                    found_controller = 1;
-                    if (initialize_controller((uint8_t)bus, (uint8_t)device,
-                                              (uint8_t)function)) {
-                        return 1;
-                    }
-                }
+        if ((identity & 0xFFFF) == 0xFFFF) {
+            if (function == 0) {
+                pci_scan_index = (pci_scan_index + 7U) & ~7U;
+            }
+            continue;
+        }
+        class_code = pci_read32(bus, device, function, 8);
+        if ((class_code >> 8) == 0x0C0330) {
+            pci_xhci_found = 1;
+            diagnostics.pci_location = ((uint32_t)bus << 16) |
+                                       ((uint32_t)device << 8) | function;
+            for (uint32_t i = 0; i < sizeof(controller); ++i) {
+                ((uint8_t *)&controller)[i] = 0;
+            }
+            if (initialize_controller(bus, device, function)) {
+                return 1;
             }
         }
     }
-    return found_controller ? -1 : 0;
+    return pci_xhci_found ? -1 : 0;
+}
+
+static enum xhci_init_status scan_controller_ports(void) {
+    int connected = 0;
+    int reset_succeeded = 0;
+    int ports_powered = 0;
+
+    diagnostics.port_count = controller.max_ports;
+    if (controller.port_power_control) {
+        for (uint32_t port = 1; port <= controller.max_ports; ++port) {
+            uint32_t port_status = read_portsc(port);
+
+            if ((port_status & (1U << 9)) == 0) {
+                write_portsc(port, 1U << 9);
+                ports_powered = 1;
+            }
+        }
+        if (ports_powered) {
+            if (!wait_microframes(XHCI_PORT_DEBOUNCE_MICROFRAMES)) {
+                for (uint32_t port = 1; port <= controller.max_ports; ++port) {
+                    set_port_stage(port, XHCI_PORT_STAGE_POWER_TIMEOUT);
+                    diagnostics.port_status[port - 1] = read_portsc(port);
+                }
+                return XHCI_INIT_FAILED;
+            }
+        }
+    }
+    for (uint32_t port = 1; port <= controller.max_ports; ++port) {
+        uint32_t speed;
+        uint32_t port_status = read_portsc(port);
+        int port_connected = (port_status & 1U) != 0;
+
+        diagnostics.port_status[port - 1] = port_status;
+        diagnostics.port_stages[port - 1] =
+            XHCI_PORT_STAGE_NO_CONNECTION;
+        if (diagnostics.connected_ports == 0) {
+            diagnostics.last_port = port;
+            diagnostics.last_port_status = port_status;
+        }
+        if (port_connected) {
+            connected = 1;
+            ++diagnostics.connected_ports;
+            diagnostics.last_port = port;
+            diagnostics.last_port_status = port_status;
+            diagnostics.last_speed = (port_status >> 10) & 0x0F;
+            diagnostics.port_stage = XHCI_PORT_STAGE_DEBOUNCE;
+            diagnostics.port_stages[port - 1] =
+                XHCI_PORT_STAGE_DEBOUNCE;
+            diagnostics.enumeration_stage = 0;
+            diagnostics.last_command_type = 0;
+            diagnostics.last_completion_code = 0;
+        } else {
+            continue;
+        }
+        if (!reset_port(port, &speed)) {
+            if (port_connected) {
+                diagnostics.last_port_status = read_portsc(port);
+                diagnostics.port_status[port - 1] =
+                    diagnostics.last_port_status;
+                diagnostics.last_speed = (diagnostics.last_port_status >> 10) & 0x0F;
+            }
+            continue;
+        }
+        reset_succeeded = 1;
+        ++diagnostics.reset_ports;
+        diagnostics.last_speed = speed;
+        diagnostics.last_port_status = read_portsc(port);
+        diagnostics.port_status[port - 1] = diagnostics.last_port_status;
+        diagnostics.enumeration_stage = 0;
+        if (usb_find_keyboard(port, speed)) {
+            return 1;
+        }
+        diagnostics.port_enumeration_stages[port - 1] =
+            diagnostics.enumeration_stage;
+        diagnostics.port_command_types[port - 1] =
+            diagnostics.last_command_type;
+        diagnostics.port_completion_codes[port - 1] =
+            diagnostics.last_completion_code;
+    }
+    if (!connected) {
+        set_port_stage(0, XHCI_PORT_STAGE_NO_CONNECTION);
+        return XHCI_INIT_NO_KEYBOARD;
+    }
+    return reset_succeeded ? XHCI_INIT_NO_KEYBOARD : XHCI_INIT_FAILED;
+}
+
+static void copy_diagnostics(struct xhci_diagnostics *destination,
+                             const struct xhci_diagnostics *source) {
+    const uint32_t *source_words =
+        (const uint32_t *)(const void *)source;
+    uint32_t *destination_words = (uint32_t *)(void *)destination;
+
+    for (uint32_t i = 0; i < sizeof(*destination) / sizeof(uint32_t); ++i) {
+        destination_words[i] = source_words[i];
+    }
+}
+
+static int stop_controller(void) {
+    if (controller.operational == 0) {
+        return 1;
+    }
+    write_reg(controller.operational,
+              read_reg(controller.operational) & ~1U);
+    if (!wait_reg(controller.operational + 1, 1, 1)) {
+        return 0;
+    }
+    if (controller.scratchpad_array_physical != 0) {
+        uint64_t *scratchpads =
+            (uint64_t *)(uintptr_t)controller.scratchpad_array_physical;
+
+        for (uint32_t i = 0; i < controller.scratchpad_count; ++i) {
+            if (scratchpads[i] != 0) {
+                pmm_free_page(scratchpads[i]);
+            }
+        }
+        pmm_free_page(controller.scratchpad_array_physical);
+    }
+    if (controller.dcbaa_physical != 0) {
+        pmm_free_page(controller.dcbaa_physical);
+    }
+    if (controller.command_ring.physical != 0) {
+        pmm_free_page(controller.command_ring.physical);
+    }
+    if (controller.event_ring_physical != 0) {
+        pmm_free_page(controller.event_ring_physical);
+    }
+    if (controller.erst_physical != 0) {
+        pmm_free_page(controller.erst_physical);
+    }
+    return 1;
 }
 
 enum xhci_init_status xhci_init(void) {
     int status;
-    int connected = 0;
-    int reset_succeeded = 0;
+    int initialized_controller = 0;
+    uint32_t controllers_scanned = 0;
+    uint32_t controllers_with_connected_ports = 0;
+    int port_initialization_failed = 0;
+    int have_best_diagnostics = 0;
+    struct xhci_diagnostics best_diagnostics;
 
     for (uint32_t i = 0; i < sizeof(controller); ++i) {
         ((uint8_t *)&controller)[i] = 0;
     }
-    status = find_controller();
-    if (status <= 0) {
-        return (enum xhci_init_status)status;
+    for (uint32_t i = 0; i < sizeof(diagnostics); ++i) {
+        ((uint8_t *)&diagnostics)[i] = 0;
     }
-    for (uint32_t port = 1; port <= controller.max_ports; ++port) {
-        uint32_t speed;
-        int port_connected = (read_portsc(port) & 1U) != 0;
+    pci_scan_index = 0;
+    pci_xhci_found = 0;
+    controller_diagnostic_count = 0;
 
-        if (port_connected) {
-            connected = 1;
+    while ((status = find_controller()) > 0) {
+        uint32_t pci_location = diagnostics.pci_location;
+        enum xhci_init_status port_status;
+
+        initialized_controller = 1;
+        ++controllers_scanned;
+        for (uint32_t i = 0; i < sizeof(diagnostics); ++i) {
+            ((uint8_t *)&diagnostics)[i] = 0;
         }
-        if (!reset_port(port, &speed)) {
-            continue;
+        diagnostics.pci_location = pci_location;
+        diagnostics.controller_stage = XHCI_CONTROLLER_STAGE_RUNNING;
+        port_status = scan_controller_ports();
+        if (port_status == XHCI_INIT_READY) {
+            return port_status;
         }
-        reset_succeeded = 1;
-        if (usb_find_keyboard(port, speed)) {
-            return 1;
+        if (port_status == XHCI_INIT_FAILED) {
+            port_initialization_failed = 1;
+        }
+        if (controller_diagnostic_count <
+            XHCI_MAX_DIAGNOSTIC_CONTROLLERS) {
+            copy_diagnostics(
+                &controller_diagnostics[controller_diagnostic_count],
+                &diagnostics);
+            ++controller_diagnostic_count;
+        }
+        if (diagnostics.connected_ports != 0) {
+            ++controllers_with_connected_ports;
+            copy_diagnostics(&best_diagnostics, &diagnostics);
+            have_best_diagnostics = 1;
+        } else if (!have_best_diagnostics) {
+            copy_diagnostics(&best_diagnostics, &diagnostics);
+            have_best_diagnostics = 1;
+        }
+        if (!stop_controller()) {
+            return XHCI_INIT_FAILED;
+        }
+        for (uint32_t i = 0; i < sizeof(controller); ++i) {
+            ((uint8_t *)&controller)[i] = 0;
         }
     }
-    if (!connected) {
-        return XHCI_INIT_NO_KEYBOARD;
+    if (initialized_controller) {
+        if (have_best_diagnostics) {
+            copy_diagnostics(&diagnostics, &best_diagnostics);
+        }
+        diagnostics.controllers_scanned = controllers_scanned;
+        diagnostics.controllers_with_connected_ports =
+            controllers_with_connected_ports;
+        return port_initialization_failed ? XHCI_INIT_FAILED :
+                                            XHCI_INIT_NO_KEYBOARD;
     }
-    return reset_succeeded ? XHCI_INIT_NO_KEYBOARD : XHCI_INIT_FAILED;
+    if (status < 0) {
+        return XHCI_INIT_FAILED;
+    }
+    return XHCI_INIT_NO_CONTROLLER;
+}
+
+void xhci_get_diagnostics(struct xhci_diagnostics *result) {
+    if (result == 0) {
+        return;
+    }
+    *result = diagnostics;
+}
+
+uint32_t xhci_get_controller_diagnostic_count(void) {
+    return controller_diagnostic_count;
+}
+
+int xhci_get_controller_diagnostics(
+    uint32_t index, struct xhci_diagnostics *result) {
+    if (result == 0 || index >= controller_diagnostic_count) {
+        return 0;
+    }
+    copy_diagnostics(result, &controller_diagnostics[index]);
+    result->controllers_scanned = diagnostics.controllers_scanned;
+    result->controllers_with_connected_ports =
+        diagnostics.controllers_with_connected_ports;
+    return 1;
 }
 
 static int keycode_to_char(uint32_t key, uint8_t modifiers, uint8_t caps) {
